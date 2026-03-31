@@ -111,14 +111,7 @@ async def google_login(body: GoogleLoginRequest, db: Session = Depends(get_db)):
         db.refresh(user)
 
     else:
-        # TODO: Re-enable faculty verification once scraper is run
-        # For now, first user becomes professor; others need an invite
-        existing_count = db.query(User).count()
-        if existing_count > 0:
-            raise HTTPException(
-                status_code=400,
-                detail="An invite link is required to join this platform",
-            )
+        # No invite token — register as professor
         user = User(email=email, name=name, role=UserRole.PROFESSOR, google_refresh_token=refresh_token)
         db.add(user)
         db.commit()
