@@ -17,6 +17,7 @@ from slot_prompt_agent import parse_slot_prompt
 SLOT_DURATION_MINUTES = 30
 BUSINESS_START_HOUR = 9
 BUSINESS_END_HOUR = 17
+PROFESSOR_RECOVERY_MINUTES = 45  # Buffer after professor blocks
 
 PRIORITY_WINDOW_DAYS = {1: 2, 2: 3, 3: 5, 4: 7}
 
@@ -25,6 +26,19 @@ def _overlaps(start: datetime, end: datetime, records: list, start_attr: str, en
     for r in records:
         if getattr(r, start_attr) < end and getattr(r, end_attr) > start:
             return True
+    return False
+
+
+def _in_professor_recovery(start: datetime, professor_blocks: list) -> bool:
+    """Check if a slot falls within the professor's recovery window after a block."""
+    for block in professor_blocks:
+        block_end = block.end_time
+        block_duration = (block.end_time - block.start_time).total_seconds() / 60
+        # Only apply recovery buffer for blocks longer than 60 minutes
+        if block_duration > 60:
+            recovery_end = block_end + timedelta(minutes=PROFESSOR_RECOVERY_MINUTES)
+            if block_end <= start < recovery_end:
+                return True
     return False
 
 
@@ -66,7 +80,8 @@ def generate_suggestions(db: Session, request_id: int, count: int = 3) -> list[d
             if slot_end.hour <= BUSINESS_END_HOUR:
                 ta_free = not _overlaps(current, slot_end, booked, "start_time", "end_time")
                 prof_free = not _overlaps(current, slot_end, professor_blocks, "start_time", "end_time")
-                if ta_free and prof_free:
+                in_recovery = _in_professor_recovery(current, professor_blocks)
+                if ta_free and prof_free and not in_recovery:
                     score_data = score_candidate_slot(
                         db, request.ta_id, current, slot_end, int(priority)
                     )
@@ -121,7 +136,8 @@ def generate_soonest_suggestions(db: Session, request_id: int, count: int = 3) -
             if slot_end.hour <= BUSINESS_END_HOUR:
                 ta_free = not _overlaps(current, slot_end, booked, "start_time", "end_time")
                 prof_free = not _overlaps(current, slot_end, professor_blocks, "start_time", "end_time")
-                if ta_free and prof_free:
+                in_recovery = _in_professor_recovery(current, professor_blocks)
+                if ta_free and prof_free and not in_recovery:
                     score_data = score_candidate_slot(
                         db, request.ta_id, current, slot_end, int(priority)
                     )
@@ -254,7 +270,8 @@ def generate_prompt_suggestions(db: Session, request_id: int, prompt: str, count
                     google_conflict = True
                     break
 
-            if ta_free and prof_free and not google_conflict:
+            in_recovery = _in_professor_recovery(current, prof_block_records)
+            if ta_free and prof_free and not google_conflict and not in_recovery:
                 # Check back-to-back if avoidance requested
                 if avoid_b2b:
                     too_close = False
