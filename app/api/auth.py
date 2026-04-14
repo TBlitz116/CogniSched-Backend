@@ -111,7 +111,27 @@ async def google_login(body: GoogleLoginRequest, db: Session = Depends(get_db)):
         db.refresh(user)
 
     else:
-        # No invite token — register as professor
+        # No invite token — verify against scraped faculty list
+        faculty_match = db.query(VerifiedFaculty).filter(
+            VerifiedFaculty.email == email
+        ).first()
+
+        if not faculty_match:
+            # Fallback: match by first + last name
+            first_name = name.split()[0].lower() if name else ""
+            last_name = name.split()[-1].lower() if name and len(name.split()) > 1 else ""
+            if first_name and last_name:
+                faculty_match = db.query(VerifiedFaculty).filter(
+                    VerifiedFaculty.name.ilike(f"%{first_name}%"),
+                    VerifiedFaculty.name.ilike(f"%{last_name}%"),
+                ).first()
+
+        if not faculty_match:
+            raise HTTPException(
+                status_code=403,
+                detail="Only verified UMBC CSEE/SE faculty can register without an invite. If you are a TA or student, please ask for an invite link.",
+            )
+
         user = User(email=email, name=name, role=UserRole.PROFESSOR, google_refresh_token=refresh_token)
         db.add(user)
         db.commit()

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     GOOGLE_REDIRECT_URI: str
     JWT_SECRET: str
     GEMINI_API_KEY: str
+    REDIS_URL: str = "redis://redis:6379/0"
     FRONTEND_URL: str = "http://localhost:3000"
     SENDGRID_API_KEY: str = ""
     SENDGRID_FROM_EMAIL: str = ""

@@ -12,6 +12,7 @@ from app.services.slot_service import generate_suggestions, generate_soonest_sug
 from app.models.approval import PendingApproval, ApprovalStatus
 from app.services.cognitive_service import recompute_and_save
 from app.services.calendar_service import create_meeting_with_meet, extract_meet_link, get_busy_slots
+from app.core.redis_client import cache_get, cache_set, cache_delete
 
 router = APIRouter()
 
@@ -247,6 +248,9 @@ def book_slot(
     db.commit()
     db.refresh(booked)
 
+    # Invalidate slot caches for this request — they're now stale
+    cache_delete(f"slot:rec:{body.request_id}", f"slot:soonest:{body.request_id}")
+
     return booked
 
 
@@ -293,15 +297,19 @@ def get_ta_calendar(
         for b in professor_blocks
     ]
 
-    # Fetch professor's Google Calendar busy slots (times only, no details)
+    # Fetch professor's Google Calendar busy slots (cached 10 min)
     professor_busy = []
     if mapping:
         professor = db.query(User).filter(User.id == mapping.professor_id).first()
         if professor and professor.google_refresh_token:
-            try:
-                professor_busy = get_busy_slots(professor.google_refresh_token)
-            except Exception:
-                pass  # Best-effort — don't break TA calendar if professor token is stale
+            gcal_key = f"gcal:busy:{mapping.professor_id}"
+            professor_busy = cache_get(gcal_key) or []
+            if not professor_busy:
+                try:
+                    professor_busy = get_busy_slots(professor.google_refresh_token)
+                    cache_set(gcal_key, professor_busy, 10 * 60)
+                except Exception:
+                    pass  # Best-effort — don't break TA calendar if professor token is stale
 
     return {"meetings": result_meetings, "professor_blocks": result_blocks, "professor_busy": professor_busy}
 
