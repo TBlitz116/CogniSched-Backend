@@ -13,6 +13,8 @@ from app.models.user import User
 from app.services.cognitive_service import score_candidate_slot
 from app.services.calendar_service import get_busy_slots
 from slot_prompt_agent import parse_slot_prompt
+from cognitive_engine import compute_daily_score, Meeting
+from app.core.redis_client import cache_get, cache_set
 
 SLOT_DURATION_MINUTES = 30
 BUSINESS_START_HOUR = 9
@@ -20,6 +22,48 @@ BUSINESS_END_HOUR = 17
 PROFESSOR_RECOVERY_MINUTES = 45  # Buffer after professor blocks
 
 PRIORITY_WINDOW_DAYS = {1: 2, 2: 3, 3: 5, 4: 7}
+
+# Cache TTLs
+_TTL_SLOTS = 5 * 60         # 5 min — slot suggestions
+_TTL_PROF_COG = 15 * 60     # 15 min — professor daily cognitive score
+
+
+def _get_professor_daily_score(db: Session, professor_id: int, target_date) -> dict:
+    """Compute the professor's cognitive load for a day based on their calendar blocks.
+    Result is cached in Redis for 15 minutes, shared across all TAs in the same team."""
+    if isinstance(target_date, datetime):
+        d = target_date.date()
+    else:
+        d = target_date
+
+    cache_key = f"prof:cog:{professor_id}:{d.isoformat()}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    day_start = datetime.combine(d, datetime.min.time())
+    day_end = datetime.combine(d, datetime.max.time())
+
+    blocks = db.query(CalendarBlock).filter(
+        CalendarBlock.professor_id == professor_id,
+        CalendarBlock.start_time >= day_start,
+        CalendarBlock.start_time <= day_end,
+    ).all()
+
+    meetings = [Meeting(start=b.start_time, end=b.end_time, topic=b.title) for b in blocks]
+    data = compute_daily_score(meetings)
+    score = data["score"]
+
+    if score <= 30:
+        label = "Light"
+    elif score <= 60:
+        label = "Moderate"
+    else:
+        label = "Heavy"
+
+    result = {"score": round(score, 1), "label": label}
+    cache_set(cache_key, result, _TTL_PROF_COG)
+    return result
 
 
 def _overlaps(start: datetime, end: datetime, records: list, start_attr: str, end_attr: str) -> bool:
@@ -43,6 +87,11 @@ def _in_professor_recovery(start: datetime, professor_blocks: list) -> bool:
 
 
 def generate_suggestions(db: Session, request_id: int, count: int = 3) -> list[dict]:
+    cache_key = f"slot:rec:{request_id}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     request = db.query(MeetingRequest).filter(MeetingRequest.id == request_id).first()
     if not request:
         return []
@@ -73,6 +122,7 @@ def generate_suggestions(db: Session, request_id: int, count: int = 3) -> list[d
 
     candidates = []
     current = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    professor_id = mapping.professor_id if mapping else None
 
     while current < window_end and len(candidates) < count * 5:
         if current.weekday() < 5 and BUSINESS_START_HOUR <= current.hour < BUSINESS_END_HOUR:
@@ -85,22 +135,36 @@ def generate_suggestions(db: Session, request_id: int, count: int = 3) -> list[d
                     score_data = score_candidate_slot(
                         db, request.ta_id, current, slot_end, int(priority)
                     )
+                    prof_daily: dict = {}
+                    if professor_id is not None:
+                        prof_daily = _get_professor_daily_score(db, professor_id, current)
                     candidates.append({
                         "slot": current.isoformat() + "Z",
                         "duration_minutes": SLOT_DURATION_MINUTES,
                         "score": score_data["slot_score"],
-                        "explanation": score_data["explanation"],
+                        "explanation": {
+                            **score_data["explanation"],
+                            "professor_cognitive_score": prof_daily.get("score"),
+                            "professor_load_label": prof_daily.get("label"),
+                        },
                     })
         current += timedelta(minutes=30)
 
     candidates.sort(key=lambda x: x["score"])
     for i, c in enumerate(candidates[:count]):
         c["rank"] = i + 1
-    return candidates[:count]
+    result = candidates[:count]
+    cache_set(cache_key, result, _TTL_SLOTS)
+    return result
 
 
 def generate_soonest_suggestions(db: Session, request_id: int, count: int = 3) -> list[dict]:
     """Generate slot suggestions sorted by earliest available time."""
+    cache_key = f"slot:soonest:{request_id}"
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     request = db.query(MeetingRequest).filter(MeetingRequest.id == request_id).first()
     if not request:
         return []
@@ -129,6 +193,7 @@ def generate_soonest_suggestions(db: Session, request_id: int, count: int = 3) -
 
     candidates = []
     current = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    professor_id = mapping.professor_id if mapping else None
 
     while current < window_end and len(candidates) < count:
         if current.weekday() < 5 and BUSINESS_START_HOUR <= current.hour < BUSINESS_END_HOUR:
@@ -141,16 +206,24 @@ def generate_soonest_suggestions(db: Session, request_id: int, count: int = 3) -
                     score_data = score_candidate_slot(
                         db, request.ta_id, current, slot_end, int(priority)
                     )
+                    prof_daily: dict = {}
+                    if professor_id is not None:
+                        prof_daily = _get_professor_daily_score(db, professor_id, current)
                     candidates.append({
                         "slot": current.isoformat() + "Z",
                         "duration_minutes": SLOT_DURATION_MINUTES,
                         "score": score_data["slot_score"],
-                        "explanation": score_data["explanation"],
+                        "explanation": {
+                            **score_data["explanation"],
+                            "professor_cognitive_score": prof_daily.get("score"),
+                            "professor_load_label": prof_daily.get("label"),
+                        },
                         "rank": len(candidates) + 1,
                     })
         current += timedelta(minutes=30)
 
     # Already sorted by time since we iterate chronologically
+    cache_set(cache_key, candidates, _TTL_SLOTS)
     return candidates
 
 
@@ -188,13 +261,17 @@ def generate_prompt_suggestions(db: Session, request_id: int, prompt: str, count
             {"start": b.start_time.isoformat(), "end": b.end_time.isoformat()}
             for b in blocks
         ]
-        # Professor's Google Calendar busy slots
+        # Professor's Google Calendar busy slots (cached 10 min)
         professor = db.query(User).filter(User.id == mapping.professor_id).first()
         if professor and professor.google_refresh_token:
-            try:
-                prof_busy_list = get_busy_slots(professor.google_refresh_token)
-            except Exception:
-                pass
+            gcal_key = f"gcal:busy:{mapping.professor_id}"
+            prof_busy_list = cache_get(gcal_key) or []
+            if not prof_busy_list:
+                try:
+                    prof_busy_list = get_busy_slots(professor.google_refresh_token)
+                    cache_set(gcal_key, prof_busy_list, 10 * 60)
+                except Exception:
+                    pass
 
     # Current cognitive state
     latest_score = db.query(CognitiveScore).filter(
@@ -236,6 +313,8 @@ def generate_prompt_suggestions(db: Session, request_id: int, prompt: str, count
     end_hour = pref_end if pref_end else BUSINESS_END_HOUR
 
     candidates = []
+    professor_id = mapping.professor_id if mapping else None
+
     for date_str in preferred_dates:
         try:
             target_date = datetime.strptime(date_str, "%Y-%m-%d")
@@ -288,11 +367,18 @@ def generate_prompt_suggestions(db: Session, request_id: int, prompt: str, count
                 score_data = score_candidate_slot(
                     db, request.ta_id, current, slot_end, int(priority)
                 )
+                prof_daily: dict = {}
+                if professor_id is not None:
+                    prof_daily = _get_professor_daily_score(db, professor_id, current)
                 candidates.append({
                     "slot": current.isoformat() + "Z",
                     "duration_minutes": duration,
                     "score": score_data["slot_score"],
-                    "explanation": score_data["explanation"],
+                    "explanation": {
+                        **score_data["explanation"],
+                        "professor_cognitive_score": prof_daily.get("score"),
+                        "professor_load_label": prof_daily.get("label"),
+                    },
                 })
             current += timedelta(minutes=30)
 

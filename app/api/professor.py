@@ -37,7 +37,15 @@ def preview_blocks(
     blocks = parse_blocks(body.prompt, today, body.timezone)
     if not blocks:
         raise HTTPException(status_code=422, detail="Could not parse any calendar blocks from that prompt")
-    return blocks
+    # Normalise to naive ISO so the frontend always gets timezone-free strings
+    return [
+        {
+            "title": b["title"],
+            "start": datetime.fromisoformat(b["start"].replace("Z", "")).replace(tzinfo=None).isoformat(),
+            "end": datetime.fromisoformat(b["end"].replace("Z", "")).replace(tzinfo=None).isoformat(),
+        }
+        for b in blocks
+    ]
 
 
 @router.post("/block/confirm")
@@ -53,8 +61,8 @@ def confirm_blocks(
 
     created = []
     for b in blocks:
-        start_dt = datetime.fromisoformat(b["start"].replace("Z", ""))
-        end_dt = datetime.fromisoformat(b["end"].replace("Z", ""))
+        start_dt = datetime.fromisoformat(b["start"].replace("Z", "")).replace(tzinfo=None)
+        end_dt = datetime.fromisoformat(b["end"].replace("Z", "")).replace(tzinfo=None)
 
         google_event_id = None
         if current_user.google_refresh_token:
@@ -79,7 +87,14 @@ def confirm_blocks(
             google_event_id=google_event_id,
         )
         db.add(block)
-        created.append({**b, "google_event_id": google_event_id})
+        # Use the normalised naive ISO strings so the optimistic frontend update
+        # positions the event correctly (no "Z" that would cause UTC→local shift)
+        created.append({
+            "title": b["title"],
+            "start": start_dt.isoformat(),
+            "end": end_dt.isoformat(),
+            "google_event_id": google_event_id,
+        })
 
     db.commit()
     return {"created": created}
