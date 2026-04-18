@@ -2,8 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import Base, engine
-from app.models import user, invite, mapping, calendar, meeting, cognitive, faculty, approval, ticket  # noqa
-from app.api import auth, users, mappings, professor, student, ta, analytics, tickets
+from app.models import user, invite, mapping, calendar, meeting, cognitive, faculty, approval, ticket, decision  # noqa
+from app.api import auth, users, mappings, professor, student, ta, analytics, tickets, decisions
 
 Base.metadata.create_all(bind=engine)
 
@@ -25,6 +25,7 @@ app.include_router(student.router, prefix="/requests", tags=["student"])
 app.include_router(ta.router, prefix="/ta", tags=["ta"])
 app.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 app.include_router(tickets.router, prefix="/tickets", tags=["tickets"])
+app.include_router(decisions.router, prefix="/decisions", tags=["decisions"])
 
 
 @app.get("/health")
