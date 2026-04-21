@@ -103,6 +103,34 @@ def send_ticket_created_email(
     _send(professor_email, subject, html)
 
 
+def send_professor_meeting_request_email(
+    ta_email: str,
+    ta_name: str,
+    professor_name: str,
+    student_name: str,
+    reason: str,
+) -> None:
+    """Notify a TA that the professor has requested they schedule a meeting with a student."""
+    subject = f"[Urgent] {professor_name} has requested a meeting with {student_name}"
+    html = f"""\
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 520px; margin: 0 auto; padding: 32px;">
+      <h2 style="color: #1e1e1e; margin-bottom: 8px;">Meeting Requested by Professor</h2>
+      <p style="color: #555; font-size: 15px; line-height: 1.5;">
+        <strong>{professor_name}</strong> has requested that you schedule a meeting with
+        <strong>{student_name}</strong> as soon as possible.
+      </p>
+      <div style="background: #fff7ed; border-left: 4px solid #f97316; border-radius: 4px; padding: 16px; margin: 20px 0;">
+        <p style="margin: 0 0 4px; font-size: 13px; font-weight: 600; color: #9a3412;">Reason</p>
+        <p style="margin: 0; font-size: 14px; color: #555; line-height: 1.5;">{reason}</p>
+      </div>
+      <p style="color: #555; font-size: 14px;">This request has been placed in your meeting queue with high priority. Please log in to Scheduler to book a slot.</p>
+      <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;" />
+      <p style="color: #bbb; font-size: 12px;">Scheduler — AI-Driven Meeting Coordination</p>
+    </div>
+    """
+    _send(ta_email, subject, html)
+
+
 def send_ticket_notification_email(
     to_email: str,
     recipient_name: str,

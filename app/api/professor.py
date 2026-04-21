@@ -8,10 +8,11 @@ from app.models.user import User, UserRole
 from app.models.calendar import CalendarBlock
 from app.models.mapping import RoleMapping
 from app.models.cognitive import CognitiveScore
-from app.models.meeting import MeetingRequest, RequestStatus, BookedMeeting
+from app.models.meeting import MeetingRequest, RequestStatus, BookedMeeting, MeetingPriority, MeetingTopic
 from app.models.approval import PendingApproval, ApprovalStatus
 from app.services.calendar_service import create_busy_block, get_upcoming_events, create_meeting_with_meet, extract_meet_link
 from app.services.cognitive_service import recompute_and_save
+from app.services.email_service import send_professor_meeting_request_email
 from professor_block_agent import parse_blocks
 
 router = APIRouter()
@@ -319,6 +320,79 @@ def approve_booking(
     recompute_and_save(db, approval.ta_id, approval.start_time.date())
 
     return {"status": "approved", "meeting_id": booked.id, "google_meet_link": meet_link}
+
+
+class InitiateMeetingBody(BaseModel):
+    student_id: int
+    ta_id: int
+    reason: str
+    ticket_id: int | None = None
+
+
+@router.post("/initiate-meeting")
+def initiate_meeting(
+    body: InitiateMeetingBody,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.PROFESSOR)),
+):
+    """Professor requests a TA to schedule a meeting with a specific student.
+
+    Creates a high-priority MeetingRequest that appears in the TA's queue,
+    then emails the TA to act on it urgently.
+    """
+    # Verify the TA is under this professor
+    mapping = db.query(RoleMapping).filter(
+        RoleMapping.ta_id == body.ta_id,
+        RoleMapping.professor_id == current_user.id,
+    ).first()
+    if not mapping:
+        raise HTTPException(status_code=403, detail="This TA is not assigned to you")
+
+    # Verify the student is under this TA
+    student_mapping = db.query(RoleMapping).filter(
+        RoleMapping.ta_id == body.ta_id,
+        RoleMapping.student_id == body.student_id,
+    ).first()
+    if not student_mapping:
+        raise HTTPException(status_code=403, detail="This student is not assigned to the selected TA")
+
+    ta = db.query(User).filter(User.id == body.ta_id).first()
+    student = db.query(User).filter(User.id == body.student_id).first()
+    if not ta or not student:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    prompt = f"[Professor-initiated] {body.reason}"
+
+    meeting_request = MeetingRequest(
+        student_id=body.student_id,
+        ta_id=body.ta_id,
+        prompt_text=prompt,
+        detected_priority=MeetingPriority.P1,
+        detected_topic=MeetingTopic.GENERAL,
+        status=RequestStatus.PENDING,
+    )
+    db.add(meeting_request)
+    db.commit()
+    db.refresh(meeting_request)
+
+    try:
+        send_professor_meeting_request_email(
+            ta_email=ta.email,
+            ta_name=ta.name,
+            professor_name=current_user.name,
+            student_name=student.name,
+            reason=body.reason,
+        )
+    except Exception:
+        pass  # Email is best-effort; meeting request is already saved
+
+    return {
+        "id": meeting_request.id,
+        "student": {"id": student.id, "name": student.name},
+        "ta": {"id": ta.id, "name": ta.name},
+        "status": meeting_request.status,
+        "created_at": meeting_request.created_at,
+    }
 
 
 @router.post("/reject/{approval_id}")

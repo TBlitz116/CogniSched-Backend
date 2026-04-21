@@ -88,8 +88,16 @@ def score_candidate_slot(
     candidate_start: datetime,
     candidate_end: datetime,
     priority: int,
+    professor_load_score: float = 0.0,
 ) -> dict:
     target_date = candidate_start.date()
     meetings = _load_ta_meetings_for_date(db, ta_id, target_date)
     score_record = get_or_compute_daily_score(db, ta_id, target_date)
-    return score_slot(candidate_start, candidate_end, meetings, priority, score_record.score)
+    return score_slot(
+        candidate_start,
+        candidate_end,
+        meetings,
+        priority,
+        score_record.score,
+        professor_load_score=professor_load_score,
+    )

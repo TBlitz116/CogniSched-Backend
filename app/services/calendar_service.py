@@ -29,25 +29,25 @@ def create_meeting_with_meet(
     organizer_refresh_token: str,
     student_email: str,
     ta_email: str,
-    professor_email: str,
+    professor_email: str | None,
     start_time: datetime,
     end_time: datetime,
     summary: str = "Scheduled Meeting",
 ) -> dict:
     """
     Creates a Google Calendar event with a Meet link.
-    Invites student, TA, and professor. Returns the created event dict.
+    Invites student and TA; professor is optional (pass None for simple TA-only meetings).
+    Returns the created event dict.
     """
     service = _get_service(organizer_refresh_token)
+    attendees = [{"email": student_email}, {"email": ta_email}]
+    if professor_email:
+        attendees.append({"email": professor_email})
     event = {
         "summary": summary,
         "start": {"dateTime": start_time.isoformat() + "Z", "timeZone": "UTC"},
         "end": {"dateTime": end_time.isoformat() + "Z", "timeZone": "UTC"},
-        "attendees": [
-            {"email": student_email},
-            {"email": ta_email},
-            {"email": professor_email},
-        ],
+        "attendees": attendees,
         "conferenceData": {
             "createRequest": {
                 "requestId": str(uuid.uuid4()),
