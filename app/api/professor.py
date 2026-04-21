@@ -11,7 +11,8 @@ from app.models.cognitive import CognitiveScore
 from app.models.meeting import MeetingRequest, RequestStatus, BookedMeeting, MeetingPriority, MeetingTopic
 from app.models.approval import PendingApproval, ApprovalStatus
 from app.services.calendar_service import create_busy_block, get_upcoming_events, create_meeting_with_meet, extract_meet_link
-from app.services.cognitive_service import recompute_and_save
+from app.services.cognitive_service import recompute_and_save, recompute_professor_score
+from app.models.cognitive import ProfessorCognitiveScore
 from app.services.email_service import send_professor_meeting_request_email
 from professor_block_agent import parse_blocks
 
@@ -98,6 +99,16 @@ def confirm_blocks(
         })
 
     db.commit()
+
+    # Recompute professor cognitive score for each affected day
+    affected_dates = {start_dt.date() for item in created
+                      for start_dt in [datetime.fromisoformat(item["start"])]}
+    for d in affected_dates:
+        try:
+            recompute_professor_score(db, current_user.id, d)
+        except Exception:
+            pass
+
     return {"created": created}
 
 
@@ -141,6 +152,48 @@ def get_professor_calendar(
             for b in blocks
         ],
         "meetings": booked,
+    }
+
+
+@router.get("/my-load")
+def get_my_load(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.PROFESSOR)),
+):
+    """Return the professor's cognitive load for today and the past 7 days."""
+    from datetime import date as date_type
+    today = datetime.utcnow().date()
+    seven_days_ago = today - timedelta(days=6)
+
+    scores = db.query(ProfessorCognitiveScore).filter(
+        ProfessorCognitiveScore.professor_id == current_user.id,
+        ProfessorCognitiveScore.date >= seven_days_ago,
+    ).order_by(ProfessorCognitiveScore.date.asc()).all()
+
+    today_score = next((s for s in scores if s.date == today), None)
+
+    def label(score: float) -> str:
+        if score <= 30: return "Light"
+        if score <= 60: return "Moderate"
+        return "Heavy"
+
+    return {
+        "today": {
+            "score": today_score.score if today_score else 0.0,
+            "block_count": today_score.block_count if today_score else 0,
+            "blocked_hours": today_score.blocked_hours if today_score else 0.0,
+            "label": label(today_score.score if today_score else 0.0),
+        },
+        "history": [
+            {
+                "date": s.date.isoformat(),
+                "score": s.score,
+                "block_count": s.block_count,
+                "blocked_hours": s.blocked_hours,
+                "label": label(s.score),
+            }
+            for s in scores
+        ],
     }
 
 

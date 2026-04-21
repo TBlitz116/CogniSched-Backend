@@ -2,7 +2,8 @@ from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
 from cognitive_engine import compute_daily_score, compute_burnout_risk, score_slot, Meeting
 from app.models.meeting import BookedMeeting
-from app.models.cognitive import CognitiveScore, BurnoutRisk
+from app.models.cognitive import CognitiveScore, BurnoutRisk, ProfessorCognitiveScore
+from app.models.calendar import CalendarBlock
 
 
 def _load_ta_meetings_for_date(db: Session, ta_id: int, target_date: date) -> list[Meeting]:
@@ -74,6 +75,52 @@ def recompute_and_save(db: Session, ta_id: int, target_date: date) -> CognitiveS
             meeting_count=data["meeting_count"],
             total_gap_minutes=data["total_gap_minutes"],
             burnout_risk=risk,
+        )
+        db.add(record)
+
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def recompute_professor_score(db: Session, professor_id: int, target_date: date) -> ProfessorCognitiveScore:
+    """Recompute the professor's cognitive score for a day based on their calendar blocks.
+
+    Score formula:
+      - Each blocked hour adds 12 points (a full 8-hour day = 96)
+      - Capped at 100
+    """
+    day_start = datetime.combine(target_date, datetime.min.time())
+    day_end = datetime.combine(target_date, datetime.max.time())
+
+    blocks = db.query(CalendarBlock).filter(
+        CalendarBlock.professor_id == professor_id,
+        CalendarBlock.start_time >= day_start,
+        CalendarBlock.start_time <= day_end,
+    ).all()
+
+    block_count = len(blocks)
+    blocked_hours = sum(
+        (b.end_time - b.start_time).total_seconds() / 3600 for b in blocks
+    )
+    score = min(round(blocked_hours * 12, 1), 100.0)
+
+    record = db.query(ProfessorCognitiveScore).filter(
+        ProfessorCognitiveScore.professor_id == professor_id,
+        ProfessorCognitiveScore.date == target_date,
+    ).first()
+
+    if record:
+        record.score = score
+        record.block_count = block_count
+        record.blocked_hours = round(blocked_hours, 2)
+    else:
+        record = ProfessorCognitiveScore(
+            professor_id=professor_id,
+            date=target_date,
+            score=score,
+            block_count=block_count,
+            blocked_hours=round(blocked_hours, 2),
         )
         db.add(record)
 

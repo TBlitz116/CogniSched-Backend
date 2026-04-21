@@ -121,7 +121,9 @@ def generate_suggestions(db: Session, request_id: int, count: int = 3) -> list[d
         ).all()
 
     candidates = []
-    current = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    # Recommended slots start from 24h from now — soonest slots cover the urgent window
+    search_start = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=24)
+    current = search_start
     professor_id = mapping.professor_id if mapping else None
 
     while current < window_end and len(candidates) < count * 5:
@@ -193,10 +195,12 @@ def generate_soonest_suggestions(db: Session, request_id: int, count: int = 3) -
         ).all()
 
     candidates = []
+    # Soonest slots are the earliest available — cap search at 48 hours
+    soonest_end = now + timedelta(hours=48)
     current = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     professor_id = mapping.professor_id if mapping else None
 
-    while current < window_end and len(candidates) < count:
+    while current < soonest_end and len(candidates) < count:
         if current.weekday() < 5 and BUSINESS_START_HOUR <= current.hour < BUSINESS_END_HOUR:
             slot_end = current + timedelta(minutes=SLOT_DURATION_MINUTES)
             if slot_end.hour <= BUSINESS_END_HOUR:
