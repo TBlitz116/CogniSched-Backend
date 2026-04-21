@@ -13,6 +13,9 @@ from app.models.approval import PendingApproval, ApprovalStatus
 from app.services.cognitive_service import recompute_and_save
 from app.services.calendar_service import create_meeting_with_meet, extract_meet_link, get_busy_slots
 from app.core.redis_client import cache_get, cache_set, cache_delete
+from app.models.ticket import ActionTicket
+from app.models.decision import DecisionCard
+from meeting_type_agent import recommend_meeting_type
 
 router = APIRouter()
 
@@ -26,6 +29,7 @@ class BookSlotBody(BaseModel):
     request_id: int
     start_time: datetime
     end_time: datetime
+    simple: bool = False  # True = TA + student only, no professor on calendar
 
 
 class BookSoonestBody(BaseModel):
@@ -189,6 +193,9 @@ def book_slot(
     topic_label = str(request.detected_topic).replace("_", " ").title() if request.detected_topic else "Meeting"
     summary = f"[P{int(request.detected_priority)}] {topic_label} — {student.name}"
 
+    # For simple meetings (TA + student only), professor is not invited
+    invite_professor_email = (professor.email if professor else current_user.email) if not body.simple else None
+
     # Create on TA's calendar (primary organizer)
     if current_user.google_refresh_token:
         try:
@@ -196,7 +203,7 @@ def book_slot(
                 organizer_refresh_token=current_user.google_refresh_token,
                 student_email=student.email,
                 ta_email=current_user.email,
-                professor_email=professor.email if professor else current_user.email,
+                professor_email=invite_professor_email,
                 start_time=body.start_time,
                 end_time=body.end_time,
                 summary=summary,
@@ -206,8 +213,8 @@ def book_slot(
         except Exception:
             pass  # Google Calendar is best-effort; booking still proceeds
 
-    # Also create on professor's calendar so it shows up directly
-    if professor and professor.google_refresh_token:
+    # Mirror on professor's calendar only for full meetings
+    if not body.simple and professor and professor.google_refresh_token:
         try:
             create_meeting_with_meet(
                 organizer_refresh_token=professor.google_refresh_token,
@@ -312,6 +319,99 @@ def get_ta_calendar(
                     pass  # Best-effort — don't break TA calendar if professor token is stale
 
     return {"meetings": result_meetings, "professor_blocks": result_blocks, "professor_busy": professor_busy}
+
+
+@router.get("/student-history/{student_id}")
+def get_student_history(
+    student_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(UserRole.TA)),
+):
+    """Return a student's meeting history + Gemini-powered meeting type recommendation.
+
+    Result is cached for 10 minutes (keyed by ta_id + student_id) to avoid
+    redundant Gemini calls when the TA flips between requests.
+    """
+    mapping = db.query(RoleMapping).filter(
+        RoleMapping.ta_id == current_user.id,
+        RoleMapping.student_id == student_id,
+    ).first()
+    if not mapping:
+        raise HTTPException(status_code=403, detail="Student not assigned to you")
+
+    student = db.query(User).filter(User.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+
+    cache_key = f"student_history:{current_user.id}:{student_id}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    # Gather history
+    past_requests = db.query(MeetingRequest).filter(
+        MeetingRequest.student_id == student_id,
+        MeetingRequest.ta_id == current_user.id,
+    ).order_by(MeetingRequest.created_at.desc()).limit(20).all()
+
+    past_tickets = db.query(ActionTicket).filter(
+        ActionTicket.student_id == student_id,
+        ActionTicket.ta_id == current_user.id,
+    ).order_by(ActionTicket.created_at.desc()).limit(20).all()
+
+    past_decisions = db.query(DecisionCard).filter(
+        DecisionCard.student_id == student_id,
+        DecisionCard.ta_id == current_user.id,
+    ).order_by(DecisionCard.created_at.desc()).limit(10).all()
+
+    booked_count = db.query(BookedMeeting).filter(
+        BookedMeeting.student_id == student_id,
+        BookedMeeting.ta_id == current_user.id,
+    ).count()
+
+    history_payload = {
+        "student_name": student.name,
+        "past_requests": [
+            {
+                "priority": int(r.detected_priority) if r.detected_priority else 4,
+                "topic": str(r.detected_topic) if r.detected_topic else "GENERAL",
+                "status": str(r.status),
+                "created_at": r.created_at.strftime("%Y-%m-%d"),
+            }
+            for r in past_requests
+        ],
+        "past_tickets": [
+            {
+                "title": t.title,
+                "shared_with_professor": t.shared_with_professor,
+                "status": str(t.status),
+            }
+            for t in past_tickets
+        ],
+        "past_decisions": [
+            {
+                "question": d.question_summary,
+                "outcome": d.outcome.value if d.outcome else None,
+            }
+            for d in past_decisions
+        ],
+        "booked_meeting_count": booked_count,
+    }
+
+    ai_result = recommend_meeting_type(history_payload)
+
+    result = {
+        "student": {"id": student.id, "name": student.name},
+        "booked_meeting_count": booked_count,
+        "past_requests": history_payload["past_requests"],
+        "past_tickets": history_payload["past_tickets"],
+        "past_decisions": history_payload["past_decisions"],
+        "recommendation": ai_result["recommendation"],
+        "reasoning": ai_result["reasoning"],
+    }
+
+    cache_set(cache_key, result, 10 * 60)
+    return result
 
 
 @router.post("/decline/{request_id}")

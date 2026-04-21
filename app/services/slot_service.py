@@ -132,12 +132,13 @@ def generate_suggestions(db: Session, request_id: int, count: int = 3) -> list[d
                 prof_free = not _overlaps(current, slot_end, professor_blocks, "start_time", "end_time")
                 in_recovery = _in_professor_recovery(current, professor_blocks)
                 if ta_free and prof_free and not in_recovery:
-                    score_data = score_candidate_slot(
-                        db, request.ta_id, current, slot_end, int(priority)
-                    )
                     prof_daily: dict = {}
                     if professor_id is not None:
                         prof_daily = _get_professor_daily_score(db, professor_id, current)
+                    score_data = score_candidate_slot(
+                        db, request.ta_id, current, slot_end, int(priority),
+                        professor_load_score=prof_daily.get("score") or 0.0,
+                    )
                     candidates.append({
                         "slot": current.isoformat() + "Z",
                         "duration_minutes": SLOT_DURATION_MINUTES,
@@ -203,12 +204,13 @@ def generate_soonest_suggestions(db: Session, request_id: int, count: int = 3) -
                 prof_free = not _overlaps(current, slot_end, professor_blocks, "start_time", "end_time")
                 in_recovery = _in_professor_recovery(current, professor_blocks)
                 if ta_free and prof_free and not in_recovery:
-                    score_data = score_candidate_slot(
-                        db, request.ta_id, current, slot_end, int(priority)
-                    )
                     prof_daily: dict = {}
                     if professor_id is not None:
                         prof_daily = _get_professor_daily_score(db, professor_id, current)
+                    score_data = score_candidate_slot(
+                        db, request.ta_id, current, slot_end, int(priority),
+                        professor_load_score=prof_daily.get("score") or 0.0,
+                    )
                     candidates.append({
                         "slot": current.isoformat() + "Z",
                         "duration_minutes": SLOT_DURATION_MINUTES,
@@ -364,12 +366,13 @@ def generate_prompt_suggestions(db: Session, request_id: int, prompt: str, count
                         current += timedelta(minutes=30)
                         continue
 
-                score_data = score_candidate_slot(
-                    db, request.ta_id, current, slot_end, int(priority)
-                )
                 prof_daily: dict = {}
                 if professor_id is not None:
                     prof_daily = _get_professor_daily_score(db, professor_id, current)
+                score_data = score_candidate_slot(
+                    db, request.ta_id, current, slot_end, int(priority),
+                    professor_load_score=prof_daily.get("score") or 0.0,
+                )
                 candidates.append({
                     "slot": current.isoformat() + "Z",
                     "duration_minutes": duration,

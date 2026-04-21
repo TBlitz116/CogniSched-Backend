@@ -81,9 +81,15 @@ def score_slot(
     existing_meetings: Sequence[Meeting],
     priority: int,
     current_daily_score: float,
+    professor_load_score: float = 0.0,
 ) -> dict:
     """
     Lower score = better slot.
+
+    `professor_load_score` is the professor's own 0-100 cognitive-load score
+    for the candidate's day (sum of their class/grading/prep blocks). When the
+    professor's day is already Heavy, meetings on that day are discouraged even
+    if the TA is free — the professor's bandwidth is the real constraint.
     """
     test_meetings = list(existing_meetings) + [Meeting(start=candidate_start, end=candidate_end)]
     new_score_data = compute_daily_score(test_meetings)
@@ -106,10 +112,27 @@ def score_slot(
     # Density penalty: more than 3 meetings already
     density_penalty = 10 if len(existing_meetings) >= 3 else 0
 
+    # Professor load penalty: if the professor's day is already heavy with
+    # classes/prep/grading, this slot is worse — even if the TA is free.
+    # Thresholds mirror the Light/Moderate/Heavy labels used elsewhere.
+    if professor_load_score > 60:
+        professor_load_penalty = 25   # Heavy
+    elif professor_load_score > 30:
+        professor_load_penalty = 10   # Moderate
+    else:
+        professor_load_penalty = 0    # Light
+
     # Urgency bonus: P1/P2 get a negative adjustment (lower = better)
     urgency_bonus = {1: 20, 2: 15, 3: 5, 4: 0}.get(priority, 0)
 
-    slot_score = cognitive_delta + back_to_back_penalty + deep_work_penalty + density_penalty - urgency_bonus
+    slot_score = (
+        cognitive_delta
+        + back_to_back_penalty
+        + deep_work_penalty
+        + density_penalty
+        + professor_load_penalty
+        - urgency_bonus
+    )
 
     # Compute buffer info for explanation
     buffers_before = [
@@ -133,5 +156,6 @@ def score_slot(
             "back_to_back": back_to_back_penalty > 0,
             "burnout_risk_after": compute_burnout_risk([new_score_data["score"]]),
             "urgency_respected": urgency_bonus > 0,
+            "professor_load_penalty": professor_load_penalty,
         },
     }
