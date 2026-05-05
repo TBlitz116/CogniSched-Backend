@@ -1,7 +1,11 @@
+import logging
+import traceback
 import uuid
 import httpx
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
+
+logger = logging.getLogger(__name__)
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
