@@ -1,17 +1,31 @@
 """
-Gemini-powered slot scheduling agent.
+Slot scheduling agent powered by Claude Haiku 4.5.
 Takes a TA's natural language prompt + calendar context and returns
-the best matching time slots.
+slot preferences for the deterministic slot-ranker downstream.
 """
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import anthropic
 from dotenv import load_dotenv
-import google.generativeai as genai
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+MODEL = "claude-haiku-4-5"
+
+
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            inner = parts[1]
+            if inner.startswith("json"):
+                inner = inner[4:]
+            text = inner
+    return text.strip()
 
 
 def parse_slot_prompt(
@@ -40,43 +54,22 @@ def parse_slot_prompt(
     """
 
     meetings_summary = "\n".join(
-        f"  - {m['start']} to {m['end']}"
-        for m in existing_meetings
+        f"  - {m['start']} to {m['end']}" for m in existing_meetings
     ) or "  (no meetings scheduled)"
 
     blocks_summary = "\n".join(
-        f"  - {b['start']} to {b['end']}"
-        for b in professor_blocks
+        f"  - {b['start']} to {b['end']}" for b in professor_blocks
     ) or "  (no blocks)"
 
     busy_summary = "\n".join(
-        f"  - {b['start']} to {b['end']}"
-        for b in professor_busy
+        f"  - {b['start']} to {b['end']}" for b in professor_busy
     ) or "  (no busy times)"
 
-    system_prompt = f"""You are a scheduling assistant for a university TA.
-Today's date is {current_date}.
+    system_prompt = """You are a scheduling assistant for a university TA.
 Business hours are 9:00 AM to 5:00 PM, Monday through Friday.
+Deep work hours (protected): 9:00 AM - 11:00 AM.
 
-Current context:
-- Meeting priority: P{priority} (1=most urgent, 4=least urgent)
-- TA's current cognitive load score: {current_cognitive_score}/100 (higher = more stressed)
-- TA's burnout risk: {burnout_risk}
-- Deep work hours (protected): 9:00 AM - 11:00 AM
-
-TA's existing meetings:
-{meetings_summary}
-
-Professor's blocked times (unavailable):
-{blocks_summary}
-
-Professor's Google Calendar busy times:
-{busy_summary}
-
-The TA says: "{prompt}"
-
-Based on the TA's request and the context above, determine the optimal scheduling preferences.
-Return ONLY valid JSON with these fields:
+Return ONLY valid JSON (no markdown, no extra text) with these fields:
 - preferred_dates: list of date strings (YYYY-MM-DD) that match the TA's request. Include 1-5 dates.
 - preferred_start_hour: earliest acceptable hour (9-17) or null if no preference
 - preferred_end_hour: latest acceptable hour (9-17) or null if no preference
@@ -91,21 +84,38 @@ Be smart about interpreting natural language:
 - "after lunch" → start_hour=13
 - "early morning" → start_hour=9, end_hour=11
 - "avoid burnout" or "light day" → protect_deep_work=true, avoid_back_to_back=true
-- If burnout risk is HIGH, always set protect_deep_work=true and avoid_back_to_back=true
-"""
+- If burnout risk is HIGH, always set protect_deep_work=true and avoid_back_to_back=true"""
+
+    user_msg = f"""Today's date is {current_date}.
+
+Current context:
+- Meeting priority: P{priority} (1=most urgent, 4=least urgent)
+- TA's current cognitive load score: {current_cognitive_score}/100 (higher = more stressed)
+- TA's burnout risk: {burnout_risk}
+
+TA's existing meetings:
+{meetings_summary}
+
+Professor's blocked times (unavailable):
+{blocks_summary}
+
+Professor's Google Calendar busy times:
+{busy_summary}
+
+The TA says: "{prompt}" """
 
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(system_prompt)
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return json.loads(text.strip())
+        response = _client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        text = _strip_fences("".join(b.text for b in response.content if b.type == "text"))
+        return json.loads(text)
     except Exception as e:
-        # Fallback: return generic preferences
-        from datetime import timedelta
+        print(f"[slot_prompt_agent] Claude error ({type(e).__name__}): {e}", flush=True)
+        # Fallback: generic next-5-weekday preferences
         today = datetime.strptime(current_date, "%Y-%m-%d")
         dates = []
         for i in range(1, 6):

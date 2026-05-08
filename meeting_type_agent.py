@@ -3,16 +3,29 @@ Analyzes a student's meeting history and recommends the appropriate meeting type
   - SIMPLE_MEETING  : TA + student only, no professor needed
   - FULL_MEETING    : professor should be involved
 
-The recommendation is based on the student's past meeting priorities, ticket escalations,
-and decision outcomes — not just the current request's priority.
+Uses Claude Haiku 4.5.
 """
 import json
 import os
-import google.generativeai as genai
+
+import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+MODEL = "claude-haiku-4-5"
+
+
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            inner = parts[1]
+            if inner.startswith("json"):
+                inner = inner[4:]
+            text = inner
+    return text.strip()
 
 
 def recommend_meeting_type(history: dict) -> dict:
@@ -46,7 +59,16 @@ def recommend_meeting_type(history: dict) -> dict:
         for d in past_decisions
     ) or "  None"
 
-    prompt = f"""You are an academic scheduling assistant. Analyze the meeting history for student "{history.get('student_name', 'Unknown')}" and recommend the most appropriate type of meeting.
+    system_prompt = """You are an academic scheduling assistant. Analyze a student's meeting history and recommend the most appropriate type of meeting.
+
+Decide between:
+- SIMPLE_MEETING: The student's issues are consistently routine and low-stakes. The TA can handle them independently. No professor involvement is needed. Typical signals: mostly P3/P4 requests, no professor escalations, tickets resolved at TA level, no significant decision cards.
+- FULL_MEETING: The student's history shows repeated escalations, unresolved high-priority issues, professor involvement, or patterns that need professor awareness. Typical signals: P1/P2 requests, tickets shared with professor, decisions escalated to professor, repeated unresolved issues.
+
+Return ONLY valid JSON (no markdown, no extra text):
+{"recommendation": "SIMPLE_MEETING" or "FULL_MEETING", "reasoning": "one clear sentence explaining why"}"""
+
+    user_msg = f"""Student: "{history.get('student_name', 'Unknown')}"
 
 Past meeting requests:
 {requests_summary}
@@ -57,24 +79,17 @@ Action tickets raised:
 Decision cards sent to professor:
 {decisions_summary}
 
-Total booked meetings: {history.get('booked_meeting_count', 0)}
+Total booked meetings: {history.get('booked_meeting_count', 0)}"""
 
-Based on this history, decide:
-- SIMPLE_MEETING: The student's issues are consistently routine and low-stakes. The TA can handle them independently. No professor involvement is needed. Typical signals: mostly P3/P4 requests, no professor escalations, tickets resolved at TA level, no significant decision cards.
-- FULL_MEETING: The student's history shows repeated escalations, unresolved high-priority issues, professor involvement, or patterns that need professor awareness. Typical signals: P1/P2 requests, tickets shared with professor, decisions escalated to professor, repeated unresolved issues.
-
-Return ONLY valid JSON (no markdown):
-{{"recommendation": "SIMPLE_MEETING" or "FULL_MEETING", "reasoning": "one clear sentence explaining why"}}
-"""
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        result = json.loads(text.strip())
+        response = _client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        text = _strip_fences("".join(b.text for b in response.content if b.type == "text"))
+        result = json.loads(text)
         rec = result.get("recommendation", "FULL_MEETING")
         if rec not in ("SIMPLE_MEETING", "FULL_MEETING"):
             rec = "FULL_MEETING"
@@ -83,6 +98,5 @@ Return ONLY valid JSON (no markdown):
             "reasoning": str(result.get("reasoning", "")).strip(),
         }
     except Exception as e:
-        print(f"[meeting_type_agent] Gemini error: {e}", flush=True)
-        # Safe default: always involve professor if AI fails
+        print(f"[meeting_type_agent] Claude error: {e}", flush=True)
         return {"recommendation": "FULL_MEETING", "reasoning": "Could not analyze history — defaulting to full meeting."}

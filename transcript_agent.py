@@ -1,29 +1,40 @@
 """
-Parses a meeting transcript and extracts actionable items using Gemini.
+Parses a meeting transcript and extracts actionable items using Claude Haiku 4.5.
 Each item is classified by scope: "ta" (TA can handle directly) or "professor" (needs escalation).
 """
 import json
 import os
-import google.generativeai as genai
+
+import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+MODEL = "claude-haiku-4-5"
+
+
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            inner = parts[1]
+            if inner.startswith("json"):
+                inner = inner[4:]
+            text = inner
+    return text.strip()
 
 
 def extract_action_items(transcript: str, student_name: str) -> list[dict]:
     """
     Returns a list of {"title": str, "description": str, "scope": "ta" | "professor"}.
 
-    scope="ta"        — TA can resolve independently (grade entry errors, late submission
-                        within TA's authority, sending resources, assignment clarification)
-    scope="professor" — requires professor involvement (regrade requests, extension requests,
-                        policy exceptions, extra credit eligibility, accommodation decisions)
+    scope="ta"        — TA can resolve independently
+    scope="professor" — requires professor involvement
     """
-    system_prompt = f"""You are an academic meeting assistant reviewing an office-hours transcript.
-Student name: {student_name}
+    system_prompt = """You are an academic meeting assistant reviewing an office-hours transcript.
 
-Extract every actionable item from this transcript. For each item, decide who should handle it:
+Extract every actionable item. For each item, decide who should handle it:
 
 - scope "ta": the TA can resolve this independently
   Examples: grade ENTRY errors (wrong score recorded, missing submission in gradebook),
@@ -34,22 +45,24 @@ Extract every actionable item from this transcript. For each item, decide who sh
   extra credit eligibility exceptions, policy exceptions, accommodation decisions, anything needing professor sign-off
 
 Return ONLY a valid JSON array (no markdown, no extra text):
-[{{"title": "short action title", "description": "what specifically needs to happen and why", "scope": "ta" or "professor"}}]
+[{"title": "short action title", "description": "what specifically needs to happen and why", "scope": "ta" or "professor"}]
 
-If there are no actionable items, return: []
+If there are no actionable items, return: []"""
+
+    user_msg = f"""Student name: {student_name}
 
 Transcript:
-{transcript}
-"""
+{transcript}"""
+
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(system_prompt)
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        items = json.loads(text.strip())
+        response = _client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        text = _strip_fences("".join(b.text for b in response.content if b.type == "text"))
+        items = json.loads(text)
         result = []
         for i in items:
             if not i.get("title"):
@@ -64,5 +77,5 @@ Transcript:
             })
         return result
     except Exception as e:
-        print(f"[transcript_agent] Gemini error: {e}", flush=True)
+        print(f"[transcript_agent] Claude error ({type(e).__name__}): {e}", flush=True)
         return []

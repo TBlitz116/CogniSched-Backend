@@ -1,17 +1,32 @@
 """
-Drafts an async "decision card" from a student's meeting request. The idea:
-most professor meetings are really just yes/no decisions in disguise
-(extensions, topic changes, policy exceptions). Rather than put them on the
-calendar, we convert them into a one-screen card the professor can resolve
-in seconds — reducing the professor's synchronous cognitive load.
+Drafts an async "decision card" from a student's meeting request. Most professor
+meetings are really just yes/no decisions in disguise (extensions, topic changes,
+policy exceptions). Rather than put them on the calendar, we convert them into a
+one-screen card the professor can resolve in seconds.
+
+Powered by Claude Haiku 4.5.
 """
 import json
 import os
-import google.generativeai as genai
+
+import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+MODEL = "claude-haiku-4-5"
+
+
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            inner = parts[1]
+            if inner.startswith("json"):
+                inner = inner[4:]
+            text = inner
+    return text.strip()
 
 
 def _fallback_draft(prompt_text: str, student_name: str) -> dict:
@@ -37,17 +52,10 @@ def draft_decision_card(
       "ta_recommendation": "TA's suggested answer + rationale (1-2 sentences)",
       "options": ["Approve 2-day extension", "Deny", "Escalate to meeting", "Request more info"]
     }
-    `options` is tailored to the specific request so the professor sees concrete
-    choices, not generic buttons.
     """
-    ta_section = f"\nTA's note to professor: {ta_note}" if ta_note else ""
-
-    system_prompt = f"""You are an assistant helping a university professor clear low-stakes
+    system_prompt = """You are an assistant helping a university professor clear low-stakes
 decisions from their inbox WITHOUT a meeting. A TA is converting a student's
 meeting request into a decision card.
-
-Student: {student_name}
-Student request: {prompt_text}{ta_section}
 
 Produce a compact decision card. Rules:
 - question_summary: ONE sentence, no more than 20 words, stating the core ask.
@@ -56,19 +64,22 @@ Produce a compact decision card. Rules:
 - options: 2 to 4 concrete, action-oriented button labels tailored to THIS request. Prefer specific labels like "Approve 2-day extension" over generic "Approve". ALWAYS include at least one "Deny" variant AND one "Escalate to meeting" option.
 
 Return ONLY valid JSON (no markdown fences, no extra text):
-{{"question_summary": "...", "context": "...", "ta_recommendation": "...", "options": ["...", "...", "...", "..."]}}
-"""
-    try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(system_prompt)
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        data = json.loads(text.strip())
+{"question_summary": "...", "context": "...", "ta_recommendation": "...", "options": ["...", "...", "...", "..."]}"""
 
-        # Shape validation — fall back if anything's missing
+    ta_section = f"\nTA's note to professor: {ta_note}" if ta_note else ""
+    user_msg = f"""Student: {student_name}
+Student request: {prompt_text}{ta_section}"""
+
+    try:
+        response = _client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        text = _strip_fences("".join(b.text for b in response.content if b.type == "text"))
+        data = json.loads(text)
+
         if not data.get("question_summary") or not isinstance(data.get("options"), list):
             return _fallback_draft(prompt_text, student_name)
         options = [str(o).strip() for o in data["options"] if str(o).strip()]
@@ -81,5 +92,5 @@ Return ONLY valid JSON (no markdown fences, no extra text):
             "options": options[:4],
         }
     except Exception as e:
-        print(f"[decision_agent] Gemini error: {e}", flush=True)
+        print(f"[decision_agent] Claude error ({type(e).__name__}): {e}", flush=True)
         return _fallback_draft(prompt_text, student_name)

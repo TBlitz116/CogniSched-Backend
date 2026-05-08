@@ -1,35 +1,52 @@
 """
-Parses professor natural language into calendar blocks using Gemini.
+Parses professor natural language into calendar blocks using Claude Haiku 4.5.
 """
 import json
 import os
-import google.generativeai as genai
-from datetime import datetime
+
+import anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+MODEL = "claude-haiku-4-5"
+
+
+def _strip_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 2:
+            inner = parts[1]
+            if inner.startswith("json"):
+                inner = inner[4:]
+            text = inner
+    return text.strip()
 
 
 def parse_blocks(prompt: str, current_date: str, timezone: str = "UTC") -> list[dict]:
     """
-    Returns list of {"title": str, "start": ISO8601, "end": ISO8601}
+    Returns list of {"title": str, "start": ISO8601, "end": ISO8601}.
+    Empty list on parse failure or upstream error (the caller surfaces a generic
+    "could not parse" message to the user; the actual error is logged here).
     """
     system_prompt = f"""Today is {current_date}. The user's timezone is {timezone}.
-Extract calendar blocks from this request. Return ONLY a valid JSON array:
+Extract calendar blocks from the user's request. Return ONLY a valid JSON array (no markdown, no extra text):
 [{{"title": "...", "start": "ISO8601 datetime", "end": "ISO8601 datetime"}}]
 If multiple blocks are mentioned, return all of them.
-Request: "{prompt}"
-"""
+If no blocks can be extracted, return: []"""
+
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(system_prompt)
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        return json.loads(text.strip())
+        response = _client.messages.create(
+            model=MODEL,
+            max_tokens=1024,
+            system=system_prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = _strip_fences("".join(b.text for b in response.content if b.type == "text"))
+        result = json.loads(text)
+        return result if isinstance(result, list) else []
     except Exception as e:
-        print(f"[professor_block_agent] Gemini error: {e}", flush=True)
+        # Loud log so quota / auth issues are diagnosable from container logs.
+        print(f"[professor_block_agent] Claude error ({type(e).__name__}): {e}", flush=True)
         return []
